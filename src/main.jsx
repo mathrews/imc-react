@@ -7,10 +7,6 @@ const url = import.meta.env.VITE_SUPABASE_URL;
 const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const db = url && anonKey ? createClient(url, anonKey) : null;
 
-function category(bmi) {
-  return bmi < 18.5 ? 'Abaixo do peso' : bmi < 25 ? 'Peso adequado' : bmi < 30 ? 'Sobrepeso'
-    : bmi < 35 ? 'Obesidade grau I' : bmi < 40 ? 'Obesidade grau II' : 'Obesidade grau III';
-}
 function validPremium(profile) {
   return ['monthly', 'yearly'].includes(profile?.plan) &&
     !!profile?.plan_expires_at && Date.parse(profile.plan_expires_at) > Date.now();
@@ -126,21 +122,34 @@ function App() {
     if (error) setMessage(error.message);
   }
   async function calculate(event) {
-    event.preventDefault(); setMessage('');
+    event.preventDefault();
+    setMessage('');
     const w = Number(weight.replace(',', '.'));
     const h = Number(height.replace(',', '.'));
-    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || w > 600 || h < 0.5 || h > 2.7) {
-      setMessage('Informe peso e altura válidos (altura em metros).'); return;
-    }
-    const bmi = Number((w / (h * h)).toFixed(2));
-    const classification = category(bmi);
-    setResult({ bmi, category: classification });
-    if (db && session) {
-      const { data, error } = await db.from('bmi_records')
-        .insert({ user_id: session.user.id, weight_kg: w, height_m: h, bmi, category: classification })
-        .select('id,weight_kg,height_m,bmi,category,created_at').single();
-      if (error) setMessage('Não foi possível salvar: ' + error.message);
-      else setHistory(prev => [data, ...prev].slice(0, 100));
+    const usuario = session?.user?.id;
+    setResult(null);
+    try {
+      const response = await fetch('/api/imc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ peso: w, altura: h }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.erro || 'Falha no cálculo');
+      if (sessionRef.current?.user?.id !== usuario) return;
+      const bmi = data.imc;
+      const classification = data.situacao;
+      setResult({ bmi, category: classification });
+      if (db && usuario) {
+        const { data: record, error } = await db.from('bmi_records')
+          .insert({ user_id: usuario, weight_kg: w, height_m: h, bmi, category: classification })
+          .select('id,weight_kg,height_m,bmi,category,created_at').single();
+        if (sessionRef.current?.user?.id !== usuario) return;
+        if (error) setMessage('Não foi possível salvar: ' + error.message);
+        else setHistory(prev => [record, ...prev].slice(0, 100));
+      }
+    } catch (error) {
+      setMessage(error.message || 'Não foi possível calcular o IMC.');
     }
   }
   async function checkout(plan) {
