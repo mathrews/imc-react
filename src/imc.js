@@ -9,7 +9,7 @@ export function calcularIMC(peso, altura) {
 export function classificarIMC(imc) {
   if (!Number.isFinite(imc) || imc < 0) throw new RangeError('IMC inválido');
   if (imc < 18.5) return 'Abaixo do peso';
-  if (imc < 25) return 'Peso adequado';
+  if (imc <= 25) return 'Peso adequado';
   if (imc < 30) return 'Sobrepeso';
   if (imc < 35) return 'Obesidade grau I';
   if (imc < 40) return 'Obesidade grau II';

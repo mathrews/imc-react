@@ -58,3 +58,11 @@ test('HTTP 400: JSON malformado', async () => {
     assert.equal(resposta.status, 400);
   });
 });
+
+test('regressão HTTP: IMC 25 deve ser Sobrepeso', async () => {
+  await comServidor(async base => {
+    const resposta = await post(base, { peso: 100, altura: 2 });
+    assert.equal(resposta.status, 200);
+    assert.deepEqual(await resposta.json(), { imc: 25, situacao: 'Sobrepeso' });
+  });
+});
