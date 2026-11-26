@@ -1,4 +1,44 @@
-import Stripe from 'stripe';import{createClient}from'@supabase/supabase-js';
-export const config={api:{bodyParser:false}};
-async function raw(req){const chunks=[];for await(const chunk of req)chunks.push(typeof chunk==='string'?Buffer.from(chunk):chunk);return Buffer.concat(chunks)}
-export default async function handler(req,res){if(req.method!=='POST')return res.status(405).end();const stripe=new Stripe(process.env.STRIPE_SECRET_KEY);let event;try{event=stripe.webhooks.constructEvent(await raw(req),req.headers['stripe-signature'],process.env.STRIPE_WEBHOOK_SECRET)}catch(e){return res.status(400).send('Webhook inválido: '+e.message)}try{if(['checkout.session.completed','customer.subscription.created','customer.subscription.updated','customer.subscription.deleted'].includes(event.type)){const supabase=createClient(process.env.SUPABASE_URL,process.env.SUPABASE_SERVICE_ROLE_KEY,{auth:{persistSession:false}});let sub;if(event.type==='checkout.session.completed'){const session=event.data.object;if(!session.subscription)return res.json({received:true});sub=await stripe.subscriptions.retrieve(session.subscription)}else sub=event.data.object;const customer=typeof sub.customer==='string'?sub.customer:sub.customer.id;const priceId=sub.items.data[0]?.price.id;const plan=priceId===process.env.STRIPE_PRICE_MONTHLY?'monthly':priceId===process.env.STRIPE_PRICE_YEARLY?'yearly':'free';const active=['active','trialing'].includes(sub.status);const expires=active&&sub.current_period_end?new Date(sub.current_period_end*1000).toISOString():null;const{error}=await supabase.from('profiles').update({plan:active?plan:'free',plan_expires_at:expires,stripe_subscription_id:sub.id}).eq('stripe_customer_id',customer);if(error)throw error}return res.json({received:true})}catch(e){return res.status(500).send(e.message)}}
+import Stripe from 'stripe';
+import { services, customerIdOf, refreshCustomer } from '../lib/billing.js';
+
+// O Stripe exige o corpo bruto: não converter para JSON antes da verificação.
+export const config = { api: { bodyParser: false } };
+async function rawBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+  return Buffer.concat(chunks);
+}
+
+const RELEVANT_EVENTS = new Set([
+  'checkout.session.completed',
+  'customer.subscription.created',
+  'customer.subscription.updated',
+  'customer.subscription.deleted',
+]);
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Use POST' });
+  let event;
+  try {
+    if (!process.env.STRIPE_WEBHOOK_SECRET) throw new Error('STRIPE_WEBHOOK_SECRET ausente');
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+    event = stripe.webhooks.constructEvent(await rawBody(req), req.headers['stripe-signature'], process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (error) {
+    return res.status(400).send('Assinatura de webhook inválida: ' + error.message);
+  }
+
+  if (!RELEVANT_EVENTS.has(event.type)) return res.status(200).json({ received: true, ignored: true });
+  const customerId = customerIdOf(event);
+  if (!customerId) return res.status(400).json({ error: 'Evento sem customer Stripe' });
+
+  try {
+    const { stripe, db } = services();
+    const updated = await refreshCustomer({ stripe, db, customerId });
+    console.info('Stripe conciliado', { event: event.type, eventId: event.id, plan: updated.plan });
+    return res.status(200).json({ received: true });
+  } catch (error) {
+    // 500 faz o Stripe tentar novamente. Não responder 200 para atualização não realizada.
+    console.error('Falha na conciliação Stripe', { event: event.type, eventId: event.id, detail: error.message });
+    return res.status(500).json({ error: 'Falha ao sincronizar assinatura' });
+  }
+}
